@@ -768,3 +768,21 @@ python3 -m http.server 8080 --directory chatwoot_fake_site
 ### Requisitos
 - Chatwoot accesible donde el `baseUrl` del widget apunte (en entradas previas del historial: **http://127.0.0.1:3000** vía forward Lima).
 - Inbox web con **websiteToken** válido en `chatwoot_fake_site/index.html`.
+
+## 2026-04-09 - Entrada #31 (Git local + criterio para GitHub)
+
+### Git local
+- `git init` en la raíz del repo; rama **`main`**; commit inicial con código propio (bridge, compose, fake site, docs, scripts).
+- **`vendor/dify/`** en **`.gitignore`**: no subir ~145MB del clon oficial; instrucciones en **`vendor/README.md`** (`git clone --depth 1`).
+
+### Overlay Dify → Miwayki
+- Archivo de red **`compose/dify-docker-compose.miwayki.yml`** (versionado). Eliminado del árbol el duplicado bajo `vendor/dify/docker/`; despliegue en VM: copiar con `rsync`/script o `docker compose -f … -f dify-docker-compose.miwayki.yml`.
+- **`scripts/rsync-dify-docker-to-vm.sh`** actualizado para copiar también ese YAML a `/var/opt/miwayki-dify/`.
+
+### Recomendación GitHub (peso)
+- **Sí conviene** publicar: el repo queda **ligero** (sin `vendor/dify`, sin `.env` con secretos).
+- Límite útil de GitHub: archivos **>100MB** rechazados; repos grandes son incómodos pero **~3k líneas** de código no son problema.
+- Tras `git remote add` / `push`, quien clone debe ejecutar el clone de Dify en `vendor/dify` según `vendor/README.md`.
+
+### Pendiente (usuario)
+- Crear repo vacío en GitHub y: `git remote add origin …`, `git push -u origin main`.
