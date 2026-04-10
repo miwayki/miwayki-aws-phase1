@@ -1,0 +1,21 @@
+services:
+  bridge:
+    build:
+      context: ../bridge
+      dockerfile: Dockerfile
+    container_name: miwayki-bridge
+    restart: unless-stopped
+    env_file:
+      - .env.bridge
+    # Host: variable en compose/.env (BRIDGE_HOST_PORT); dentro del contenedor sigue siendo 8000 (webhook bridge.local:8000).
+    ports:
+      - "127.0.0.1:${BRIDGE_HOST_PORT:-8000}:8000"
+    networks:
+      core_net:
+        aliases:
+          - bridge.local
+
+networks:
+  core_net:
+    external: true
+    name: miwayki-core-net

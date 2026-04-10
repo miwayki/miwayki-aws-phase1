@@ -1,0 +1,8 @@
+services:
+  postgres:
+    # En prod idealmente no se publica a host.
+    ports: []
+
+  redis:
+    # En prod idealmente no se publica a host.
+    ports: []

@@ -1,0 +1,19 @@
+# Extensión Miwayki: conecta el servicio `api` de Dify a la red Docker del stack Chatwoot/bridge
+# para que el bridge pueda llamar a http://api:5001/v1 desde la red miwayki-core-net.
+#
+# Copia este archivo junto al docker-compose oficial de Dify (p. ej. en /var/opt/miwayki-dify/) y ejecuta:
+#   docker compose -p dify -f docker-compose.yaml -f dify-docker-compose.miwayki.yml up -d
+#
+# Requisito: existe la red externa `miwayki-core-net` (compose Miwayki ya levantado al menos una vez).
+
+services:
+  api:
+    networks:
+      - ssrf_proxy_network
+      - default
+      - miwayki-core-net
+
+networks:
+  miwayki-core-net:
+    name: miwayki-core-net
+    external: true

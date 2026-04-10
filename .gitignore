@@ -1,0 +1,20 @@
+# Entornos y secretos (usar *.example)
+compose/.env
+compose/.env.bridge
+compose/.env.chatwoot
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Dify upstream: clonar aparte (ver vendor/README.md); evita ~145MB+ y duplicar historial ajeno
+vendor/dify/

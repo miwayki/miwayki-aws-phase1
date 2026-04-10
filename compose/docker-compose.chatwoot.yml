@@ -1,0 +1,32 @@
+services:
+  chatwoot:
+    image: chatwoot/chatwoot:latest
+    container_name: miwayki-chatwoot
+    restart: unless-stopped
+    env_file:
+      - .env.chatwoot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - core_net
+
+  chatwoot-sidekiq:
+    image: chatwoot/chatwoot:latest
+    container_name: miwayki-chatwoot-sidekiq
+    restart: unless-stopped
+    env_file:
+      - .env.chatwoot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+    networks:
+      - core_net
