@@ -2,8 +2,8 @@
 
 **Nombre del proyecto:** Plataforma de captacion, cualificacion y seguimiento de leads con chat web + IA + handoff humano  
 **Estado del documento:** Aprobado como documento maestro de arquitectura y desarrollo  
-**Version:** 1.0  
-**Fecha:** 2026-04-05  
+**Version:** 1.1  
+**Fecha:** 2026-04-10  
 **Propietario:** miwayki.com  
 **Uso previsto:** Documento raiz para Cursor, desarrollo tecnico, decisiones de arquitectura, operacion DevOps, incorporacion de nuevos miembros y control de cambios.
 
@@ -1185,65 +1185,398 @@ No se aprueba editar contenedores a mano en produccion como practica habitual. T
 
 ---
 
-## 25. Roadmap de implementacion
+## 25. Roadmap de implementacion revisado
 
-## Fase 0 - Preparacion
+Este roadmap reemplaza la version generica anterior y queda alineado con dos realidades del proyecto:
 
-- aprobar este documento
-- crear repositorio
-- definir naming y dominios
-- definir estrategia inicial de orquestador y modelo
+1. el stack base ya fue validado en local dentro de una VM Linux sobre Lima en macOS Apple Silicon;
+2. el despliegue en AWS ya se ha iniciado, por lo que el siguiente objetivo no es "explorar arquitectura", sino cerrar correctamente la **fase basica** y dejarla lista para promocion a staging/productivo controlado.
 
-## Fase 1 - Infraestructura base
+### 25.1 Estado consolidado real del proyecto al momento de esta revision
 
-- aprovisionar EC2 recomendada
-- instalar Docker y Compose
-- montar Nginx, Postgres y Redis
-- montar observabilidad basica
-- configurar DNS y certificados
+#### Ya completado en entorno local
 
-## Fase 2 - Chatwoot
+- VM local `miwayki-linux` operativa con Ubuntu 24.04 LTS sobre backend `vz`;
+- Docker Engine y Docker Compose instalados y probados;
+- stack base `postgres + redis` levantado con Compose;
+- PostgreSQL ajustado a `pgvector/pgvector:pg16` para compatibilidad con Chatwoot;
+- Chatwoot web + Sidekiq levantados y accesibles;
+- inbox web y widget embebido validados mediante sitio fake local;
+- Bridge FastAPI minimo operativo;
+- webhook Chatwoot -> Bridge validado con respuesta automatica E2E;
+- Dify self-hosted levantado en la misma VM, conectado a la red `miwayki-core-net`;
+- modelo Gemini conectado en Dify para pruebas locales;
+- Chatflow de prueba funcionando en Preview;
+- Bridge integrado con Dify por API interna `http://api:5001/v1`;
+- healthchecks tecnicos del Bridge (`/health`, `/health/dify`) ya implementados;
+- repositorio local inicializado con estrategia correcta para excluir `vendor/dify` y secretos.
 
-- desplegar Chatwoot
-- crear inbox del sitio web
-- configurar custom attributes
-- configurar Agent Bot
-- validar widget embebido en miwayki.com
+#### Ya decidido y no debe reabrirse en esta fase
 
-## Fase 3 - Bridge
+- Chatwoot sigue siendo el front conversacional e inbox humano;
+- el Bridge FastAPI sigue siendo la capa obligatoria de integracion y reglas del negocio;
+- Dify se usara como orquestador inicial, pero sin romper la interfaz de adaptador;
+- Mautic queda fuera del corte de salida de la fase basica y entra despues;
+- no se usara n8n;
+- el patron canonico sigue siendo `Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot`.
 
-- crear proyecto FastAPI
-- implementar validacion HMAC
-- implementar idempotencia
-- implementar Chatwoot adapter
-- implementar orquestador adapter
-- publicar respuesta al hilo
-- actualizar atributos
-- soportar handoff
+#### Aun pendiente para cerrar la fase basica
 
-## Fase 4 - IA
+- publicar formalmente el Chatflow de Dify que se usara en servicio;
+- generar y rotar la app API key definitiva de Dify para el entorno AWS;
+- dejar estable el contrato JSON de salida del orquestador;
+- activar sincronizacion de `custom_attributes` en Chatwoot para score, temperatura y resumen;
+- implementar scoring inicial util de negocio en el Bridge;
+- dejar handoff basico funcional y visible para ventas;
+- definir despliegue AWS repetible, con dominios, TLS, secretos, backups y runbooks.
 
-- definir prompt base del agente
-- definir esquema JSON de salida
-- implementar extraccion de datos
-- implementar scoring inicial
-- implementar memoria resumida por lead
+### 25.2 Criterio de salida de la fase basica
 
-## Fase 5 - Hardening
+La fase basica no se considera terminada por el simple hecho de que "el chat responde". Se considera cerrada solo si cumple simultaneamente con todo lo siguiente:
 
-- timeouts
-- reintentos
-- logs estructurados
-- backups
-- alarmas
-- runbooks
+- el widget web abre una conversacion real desde miwayki.com o un staging equivalente;
+- Chatwoot recibe el mensaje y mantiene el hilo correcto;
+- el Bridge valida, filtra loops e invoca Dify por API interna;
+- Dify responde con texto util y estructura procesable;
+- el Bridge publica la respuesta en Chatwoot dentro del mismo hilo;
+- el sistema persiste estado minimo por conversacion;
+- Chatwoot muestra `lead_score`, `lead_temperature`, `handoff_recommended` y `last_ai_summary`;
+- el vendedor puede tomar el control sin romper la continuidad;
+- existe procedimiento reproducible de levantar, reiniciar, actualizar y restaurar el stack en AWS.
 
-## Fase 6 - Fase comercial avanzada
+### 25.3 Reglas operativas obligatorias para despliegue
 
-- notas privadas -> memoria
-- follow-up logic
-- modulo Mautic
-- reportes y KPIs
+#### Regla 1 - No ejecutar Compose "a ciegas" desde la raiz
+
+Los archivos Compose del core viven en `compose/`. El despliegue del core debe ejecutarse de una de estas dos formas:
+
+```bash
+./miwayki-compose.sh up -d --build bridge
+```
+
+O bien:
+
+```bash
+cd compose && docker compose   -f docker-compose.yml   -f docker-compose.chatwoot.yml   -f docker-compose.bridge.yml   up -d --build
+```
+
+No se aprueba depender de un `docker-compose.yml` inventado en la raiz si rompe redes, includes o nombres de proyecto.
+
+#### Regla 2 - Dify se despliega como stack separado
+
+Dify debe mantenerse en un arbol operativo independiente, por ejemplo:
+
+- codigo fuente o vendor en el repo para referencia;
+- stack ejecutable en host en `/var/opt/miwayki-dify/`;
+- overlay propio `compose/dify-docker-compose.miwayki.yml`;
+- red compartida con el core mediante `miwayki-core-net`.
+
+#### Regla 3 - El Bridge siempre consume Dify por hostname interno
+
+Desde el contenedor `bridge`, la URL aprobada para Dify es:
+
+```text
+http://api:5001/v1
+```
+
+No se debe usar `127.0.0.1` dentro del contenedor porque apuntaria al propio Bridge, no a Dify.
+
+#### Regla 4 - Secrets solo en servidor
+
+No se versionan:
+
+- `CHATWOOT_API_TOKEN`
+- `CHATWOOT_WEBHOOK_SECRET`
+- `DIFY_API_KEY`
+- credenciales de modelo
+- secretos de correo o dominios
+
+#### Regla 5 - Toda actualizacion del Bridge exige rebuild real
+
+Despues de cambiar codigo del Bridge, el contenedor debe reconstruirse. No basta con reiniciar sin build.
+
+### 25.4 Topologia aprobada para la fase basica en AWS
+
+#### Opcion preferente si se valida compatibilidad ARM64
+
+- 1 EC2 `m7g.xlarge`
+- 4 vCPU
+- 16 GiB RAM
+- 150 GB gp3 como base minima
+- Ubuntu 22.04 LTS o Ubuntu 24.04 LTS
+
+#### Opcion fallback x86
+
+- 1 EC2 `t3a.xlarge` o `t3.xlarge`
+- 4 vCPU
+- 16 GiB RAM
+- 150 GB gp3 como base minima
+
+#### Distribucion de servicios en la fase basica
+
+En la primera salida controlada se permite co-residencia en una sola EC2 de:
+
+- Nginx
+- Chatwoot web
+- Chatwoot Sidekiq
+- PostgreSQL
+- Redis
+- Bridge FastAPI
+- Dify stack inicial
+
+Esta co-residencia es valida solo para fase basica / primera version productiva controlada. Si Dify o Chatwoot presionan demasiado CPU, RAM o disco, el primer candidato a separacion sera Dify.
+
+### 25.5 Roadmap ejecutable por fases
+
+## Fase 0 - Cierre del baseline local
+
+**Objetivo:** congelar una linea base local confiable antes de tocar AWS en serio.
+
+**Tareas obligatorias:**
+
+- consolidar `README`, `compose/README.md` y runbooks minimos;
+- verificar que `.env.example`, `.env.chatwoot.example` y `.env.bridge.example` cubren todas las variables necesarias;
+- dejar confirmados los comandos canonicos de arranque del core y de Dify;
+- etiquetar el estado actual del Bridge con `bridge_build` visible en `/health`;
+- registrar en historial la ultima version funcional del stack local;
+- asegurar que `vendor/dify` siga fuera del repositorio remoto.
+
+**Criterio de salida:** cualquier miembro tecnico debe poder levantar el entorno local sin pedir instrucciones adicionales por chat.
+
+## Fase 1 - Bootstrap de la EC2 AWS
+
+**Objetivo:** dejar la maquina de AWS lista para alojar el stack completo de fase basica.
+
+**Tareas obligatorias:**
+
+- crear o validar la EC2 aprobada;
+- adjuntar volumen gp3 persistente;
+- instalar Docker Engine y Compose plugin;
+- crear usuario operativo no root;
+- configurar acceso SSH por llaves;
+- cerrar puertos no necesarios en Security Group;
+- permitir solo `80/443` publicos y acceso SSH restringido por IP;
+- bloquear exposicion publica de `5432` y `6379`;
+- preparar arbol de despliegue, por ejemplo:
+  - `/opt/miwayki-platform/`
+  - `/var/opt/miwayki-dify/`
+  - `/var/backups/miwayki/`
+- instalar utilidades minimas de operacion: `curl`, `jq`, `git`, `htop`, `fail2ban` si aplica.
+
+**Criterio de salida:** la EC2 acepta despliegue dockerizado, tiene disco persistente, acceso seguro y estructura de paths definida.
+
+## Fase 2 - Despliegue del core de datos
+
+**Objetivo:** levantar primero persistencia y red interna antes de servicios de aplicacion.
+
+**Tareas obligatorias:**
+
+- desplegar `postgres` y `redis` desde `compose/docker-compose.yml`;
+- validar healthchecks;
+- verificar persistencia de volumenes;
+- crear snapshot inicial o backup base;
+- documentar credenciales de servicio y nombre de red Docker;
+- comprobar que `miwayki-core-net` existe y queda disponible para stacks posteriores.
+
+**Criterio de salida:** Postgres y Redis quedan estables tras reinicio del host y con datos persistentes.
+
+## Fase 3 - Despliegue de Chatwoot
+
+**Objetivo:** poner operativo el front conversacional y la bandeja del equipo.
+
+**Tareas obligatorias:**
+
+- desplegar Chatwoot web + Sidekiq;
+- ejecutar `rails db:chatwoot_prepare` donde corresponda;
+- completar onboarding inicial;
+- crear inbox web del sitio;
+- obtener y guardar `websiteToken`;
+- generar `CHATWOOT_API_TOKEN` para el Bridge;
+- configurar webhook `message_created` hacia el Bridge;
+- definir desde ya los `custom_attributes` que se usaran en fase basica:
+  - `lead_score`
+  - `lead_temperature`
+  - `handoff_recommended`
+  - `last_ai_summary`
+  - `product_interest`
+  - `travel_date`
+  - `party_size`
+
+**Criterio de salida:** un mensaje enviado desde el widget entra a Chatwoot y queda visible para agente humano.
+
+## Fase 4 - Despliegue del Bridge FastAPI
+
+**Objetivo:** activar la capa de integracion estable entre Chatwoot y Dify.
+
+**Tareas obligatorias:**
+
+- desplegar imagen del Bridge con rebuild real;
+- configurar variables de entorno del Bridge;
+- validar endpoint `/health`;
+- validar filtrado anti-loop;
+- validar webhook firmado mediante `CHATWOOT_WEBHOOK_SECRET`;
+- validar publicacion de respuesta al hilo con `CHATWOOT_API_TOKEN`;
+- dejar log estructurado minimo para:
+  - ingreso de webhook
+  - decision de ruta
+  - invocacion Dify
+  - POST a Chatwoot
+  - fallo de firma
+  - fallo de timeout
+- persistir, como minimo, el mapeo de `conversation_id -> session_id` y eventos procesados si ya existe la tabla o repositorio correspondiente.
+
+**Criterio de salida:** Chatwoot puede llamar al Bridge y el Bridge puede responder al hilo de forma controlada, sin duplicacion por loops obvios.
+
+## Fase 5 - Despliegue de Dify en AWS
+
+**Objetivo:** mover el orquestador ya validado en local al host AWS con red interna compartida.
+
+**Tareas obligatorias:**
+
+- copiar el stack de Dify a `/var/opt/miwayki-dify/`;
+- aplicar `dify.env.overrides` y overlay de red Miwayki;
+- levantar stack Dify;
+- validar `http://127.0.0.1:9080/install` o el dominio interno asignado;
+- completar setup admin si el entorno es nuevo;
+- instalar y validar proveedor de modelo aprobado para el entorno;
+- publicar la app de Dify que se usara realmente en servicio;
+- generar una nueva `DIFY_API_KEY` de aplicacion;
+- guardar la key solo en el host AWS;
+- comprobar que desde el contenedor Bridge responde `http://api:5001/health`;
+- comprobar que `POST /v1/chat-messages` devuelve 200 desde el Bridge.
+
+**Criterio de salida:** el Bridge puede consumir Dify por red interna y obtener respuesta valida en modo blocking.
+
+## Fase 6 - Cierre funcional de la fase basica
+
+**Objetivo:** transformar el loop tecnico en un flujo comercial util.
+
+**Tareas obligatorias:**
+
+- definir prompt base del agente de viajes;
+- definir contrato JSON de salida del orquestador;
+- incluir como minimo:
+  - `reply_text`
+  - `lead_score`
+  - `lead_temperature`
+  - `handoff_recommended`
+  - `reasoning_summary`
+  - `extracted_fields`
+  - `next_best_action`
+- adaptar el Bridge para consumir ese contrato;
+- activar `BRIDGE_SYNC_CHATWOOT_ATTRIBUTES=1` antes de la UAT en AWS;
+- actualizar `custom_attributes` en Chatwoot con score, temperatura y resumen;
+- implementar heuristica fallback si Dify no entrega salida estructurada;
+- dejar handoff basico cuando `lead_score >= 70` o el usuario pida humano;
+- capturar al menos `email` o `telefono` cuando el lead coopera;
+- dejar una respuesta de fallback controlada si Dify cae.
+
+**Criterio de salida:** la IA ya no solo responde; tambien clasifica, resume y recomienda handoff en el hilo visible del vendedor.
+
+## Fase 7 - Hardening para deploy utilizable
+
+**Objetivo:** pasar de demo tecnica a servicio operable.
+
+**Tareas obligatorias:**
+
+- poner Nginx delante de Chatwoot y, si se expone, delante de Dify admin;
+- emitir TLS real con Certbot o equivalente;
+- restringir Dify admin por IP o autenticacion adicional si se expone;
+- configurar reinicio automatico de contenedores;
+- configurar backups diarios de Postgres;
+- copiar backups cifrados a S3 o almacenamiento seguro;
+- documentar restauracion;
+- habilitar alarmas minimas de CPU, RAM, disco y caida de servicios;
+- documentar runbooks:
+  - reinicio del host
+  - reconstruccion del Bridge
+  - reinicio de `dify-api-1`
+  - restauracion de Postgres
+  - rotacion de secretos
+
+**Criterio de salida:** el sistema puede fallar y recuperarse con procedimiento documentado, no con memoria informal del operador.
+
+## Fase 8 - UAT y salida controlada
+
+**Objetivo:** validar el sistema sobre trafico real o semirreal antes del corte completo.
+
+**Tareas obligatorias:**
+
+- probar widget en staging o pagina controlada;
+- ejecutar smoke tests end-to-end;
+- validar rutas de cierre de venta mas comunes;
+- revisar que el tiempo de respuesta sea aceptable;
+- comprobar que el vendedor ve score y temperatura;
+- probar handoff manual;
+- probar reinicio del host y persistencia;
+- abrir trafico limitado antes de abrir trafico total.
+
+**Criterio de salida:** el equipo comercial acepta el flujo y el equipo tecnico acepta la operabilidad.
+
+## Fase 9 - Post fase basica / fase 2
+
+**No bloquea el deploy inicial.**
+
+Incluye:
+
+- notas privadas -> memoria del lead;
+- mayor calidad de scoring;
+- memoria resumida persistente por lead;
+- automatizacion Mautic;
+- seguimiento por email;
+- reportes, KPIs y segmentacion avanzada;
+- soporte de consultas sobre estado de reserva y promociones de ultimo minuto.
+
+### 25.6 Dependencias criticas antes de desplegar en AWS
+
+No iniciar el go-live de la fase basica si falta cualquiera de estas dependencias:
+
+- `CHATWOOT_API_TOKEN` valido;
+- `CHATWOOT_WEBHOOK_SECRET` validado contra el webhook real;
+- `DIFY_API_KEY` publicada y rotada;
+- app Dify publicada;
+- DNS y TLS funcionando;
+- backups de Postgres probados;
+- variables de entorno finales en el host;
+- comando de rebuild del Bridge probado en AWS;
+- comando de reinicio de Dify probado en AWS.
+
+### 25.7 Riesgos concretos de despliegue y respuesta esperada
+
+#### Si Chatwoot reinicia con `server.pid` obsoleto
+
+- recrear solo el contenedor `chatwoot`;
+- no destruir volumenes de Postgres.
+
+#### Si Dify muestra spinner infinito en `/install`
+
+- esperar el primer arranque completo;
+- si no responde, revisar `dify-api-1` y reiniciar ese contenedor;
+- verificar luego `http://api:5001/health`.
+
+#### Si el Bridge responde `/health` pero no `/health/dify`
+
+- validar red `miwayki-core-net`;
+- validar hostname interno `api`;
+- validar que el stack Dify este arriba;
+- validar que el Bridge se haya reconstruido con la version correcta.
+
+#### Si Docker responde contra el daemon equivocado
+
+- ejecutar Compose en la maquina que realmente aloja los contenedores;
+- en el setup actual, eso significa la VM local o la EC2 AWS correspondiente, no cualquier terminal del host.
+
+### 25.8 Entregables documentales obligatorios de esta revision
+
+Al cerrar la fase basica deben existir y mantenerse actualizados:
+
+- `miwayki_master_spec.md`
+- `historial_chat.md`
+- `compose/README.md`
+- `vendor/README.md`
+- `CHANGELOG.md`
+- runbooks de operacion y restauracion
+- `.env.example` y equivalentes por servicio
 
 ---
 

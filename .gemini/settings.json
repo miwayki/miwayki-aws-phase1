@@ -1,0 +1,11 @@
+{
+  "general": {
+    "defaultApprovalMode": "plan"
+  },
+  "experimental": {
+    "worktrees": true
+  },
+  "context": {
+    "fileName": ["GEMINI.md"]
+  }
+}

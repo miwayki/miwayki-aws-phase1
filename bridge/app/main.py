@@ -9,9 +9,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 
 # Cambia cuando quieras comprobar desde fuera si el proceso en :8000 es imagen nueva o vieja.
-BRIDGE_BUILD = "0.4-minimal-default"
+BRIDGE_BUILD = "0.10-private-note-context"
 
-app = FastAPI(title="Miwayki Bridge", version="0.4.0")
+app = FastAPI(title="Miwayki Bridge", version="0.8.2")
 
 CHATWOOT_BASE_URL = os.getenv("CHATWOOT_BASE_URL", "http://chatwoot:3000")
 CHATWOOT_API_TOKEN = os.getenv("CHATWOOT_API_TOKEN", "")
@@ -173,17 +173,18 @@ async def _chatwoot_merge_custom_attributes(
     account_id: Any,
     conversation_id: Any,
     updates: dict[str, Any],
+    prev_conv: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """GET + PATCH para no pisar atributos de negocio ya existentes en la conversación."""
-    prev = await _chatwoot_fetch_conversation(client, account_id, conversation_id)
+    """GET + POST para no pisar atributos de negocio ya existentes en la conversación."""
+    prev = prev_conv or await _chatwoot_fetch_conversation(client, account_id, conversation_id)
     existing_raw = (prev or {}).get("custom_attributes")
     existing: dict[str, Any] = existing_raw if isinstance(existing_raw, dict) else {}
     merged = {**existing, **updates}
     url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/{account_id}"
-        f"/conversations/{conversation_id}"
+        f"/conversations/{conversation_id}/custom_attributes"
     )
-    r = await client.patch(
+    r = await client.post(
         url,
         headers={"api_access_token": CHATWOOT_API_TOKEN},
         json={"custom_attributes": merged},
@@ -197,7 +198,67 @@ async def _chatwoot_merge_custom_attributes(
     return {"ok": True, "http_status": r.status_code}
 
 
-async def _dify_blocking_reply(query: str, chatwoot_conversation_id: str) -> str:
+async def _chatwoot_sync_labels(
+    client: httpx.AsyncClient,
+    account_id: Any,
+    conversation_id: Any,
+    add_labels: list[str] | None = None,
+    remove_labels: list[str] | None = None,
+    prev_conv: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GET + POST para añadir/quitar etiquetas sin pisar el resto (Chatwoot espera lista completa)."""
+    prev = prev_conv or await _chatwoot_fetch_conversation(client, account_id, conversation_id)
+    existing: list[str] = (prev or {}).get("labels") or []
+    
+    current_set = set(existing)
+    if add_labels:
+        current_set.update(add_labels)
+    if remove_labels:
+        current_set.difference_update(remove_labels)
+    
+    merged = list(current_set)
+    
+    url = (
+        f"{CHATWOOT_BASE_URL}/api/v1/accounts/{account_id}"
+        f"/conversations/{conversation_id}/labels"
+    )
+    r = await client.post(
+        url,
+        headers={"api_access_token": CHATWOOT_API_TOKEN},
+        json={"labels": merged},
+    )
+    if r.status_code >= 300:
+        return {
+            "ok": False,
+            "http_status": r.status_code,
+            "detail": r.text[:400],
+        }
+    return {"ok": True, "labels": merged}
+
+
+async def _chatwoot_update_contact(
+    client: httpx.AsyncClient,
+    account_id: Any,
+    contact_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PATCH para actualizar datos de contacto. Chatwoot mezcla custom_attributes nativamente."""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{account_id}/contacts/{contact_id}"
+    r = await client.patch(
+        url,
+        headers={"api_access_token": CHATWOOT_API_TOKEN},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        return {
+            "ok": False,
+            "http_status": r.status_code,
+            "detail": r.text[:400],
+        }
+    return {"ok": True, "http_status": r.status_code}
+
+
+async def _dify_blocking_reply(query: str, chatwoot_conversation_id: str) -> dict[str, Any]:
     """POST /chat-messages en modo blocking. Documentación: Dify Chatflow / Advanced Chat API."""
     if not DIFY_API_KEY:
         raise RuntimeError("DIFY_API_KEY no configurada")
@@ -228,10 +289,20 @@ async def _dify_blocking_reply(query: str, chatwoot_conversation_id: str) -> str
         _dify_conversation_by_chatwoot[chatwoot_conversation_id] = new_cid
 
     answer = data.get("answer")
-    if isinstance(answer, str) and answer.strip():
-        return answer.strip()
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError(f"Respuesta Dify sin campo answer: {str(data)[:300]}")
 
-    raise RuntimeError(f"Respuesta Dify sin campo answer: {str(data)[:300]}")
+    raw_answer = answer.strip()
+    # Intento de parseo JSON para contrato estructurado (§12.3)
+    try:
+        parsed = json.loads(raw_answer)
+        if isinstance(parsed, dict) and "reply_text" in parsed:
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Fallback: tratar la respuesta como texto plano
+    return {"reply_text": raw_answer}
 
 
 def _dify_service_root() -> str:
@@ -289,9 +360,6 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
     if event != "message_created":
         return {"ok": True, "ignored": True, "reason": "non_message_created_event"}
 
-    if not _is_incoming_user_message(payload):
-        return {"ok": True, "ignored": True, "reason": "not_incoming_user_message"}
-
     account_id = _safe_get(payload, "account", "id")
     conversation_id = _safe_get(payload, "conversation", "id")
 
@@ -300,6 +368,23 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
             status_code=400,
             detail="Webhook sin account_id o conversation_id",
         )
+
+    # Intercepción de Nota Privada de Agente (Seller Feedback)
+    is_private = payload.get("private") is True
+    sender_type = _safe_get(payload, "sender", "type")
+    if is_private and sender_type == "agent":
+        note_text = _chatwoot_message_text(payload)
+        if note_text:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await _chatwoot_merge_custom_attributes(
+                    client, account_id, conversation_id,
+                    {"pending_seller_feedback": note_text}
+                )
+            return {"ok": True, "note_captured": True}
+        return {"ok": True, "ignored": True, "reason": "empty_private_note"}
+
+    if not _is_incoming_user_message(payload):
+        return {"ok": True, "ignored": True, "reason": "not_incoming_user_message"}
 
     if not CHATWOOT_API_TOKEN:
         return {
@@ -313,9 +398,22 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
     if not user_text:
         return {"ok": True, "ignored": True, "reason": "empty_message_content"}
 
+    consumed_feedback = None
+    conv_data = None
+    
+    # Pre-fetch de conversación para extraer contexto de vendedor
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        conv_data = await _chatwoot_fetch_conversation(client, account_id, conversation_id)
+        if conv_data:
+            feedback = _safe_get(conv_data, "custom_attributes", "pending_seller_feedback")
+            if feedback and str(feedback).strip():
+                consumed_feedback = str(feedback).strip()
+                user_text = f"[CONTEXTO VENDEDOR]: {consumed_feedback}\n---\n{user_text}"
+
     if DIFY_API_KEY:
         try:
-            reply_text = await _dify_blocking_reply(user_text, cw_cid)
+            dify_result = await _dify_blocking_reply(user_text, cw_cid)
+            reply_text = dify_result.get("reply_text") or "..."
             source = "dify"
         except Exception as exc:
             raise HTTPException(
@@ -323,6 +421,7 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
                 detail=f"Error llamando a Dify: {exc}",
             ) from exc
     else:
+        dify_result = {"reply_text": BRIDGE_AUTO_REPLY}
         reply_text = BRIDGE_AUTO_REPLY
         source = "static_auto_reply"
 
@@ -335,6 +434,7 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
 
     http_timeout = 30.0 if BRIDGE_SYNC_CHATWOOT_ATTRIBUTES else 15.0
     attr_report: dict[str, Any] | None = None
+    contact_report: dict[str, Any] | None = None
     lead: dict[str, Any] | None = None
     async with httpx.AsyncClient(timeout=http_timeout) as client:
         response = await client.post(msg_url, json=msg_body, headers=headers)
@@ -346,24 +446,120 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
             )
 
         if BRIDGE_SYNC_CHATWOOT_ATTRIBUTES:
-            lead = _heuristic_lead_signals(user_text, ai_source=source)
-            summary = reply_text.strip().replace("\n", " ")
-            if len(summary) > 280:
-                summary = summary[:277] + "..."
-            updates: dict[str, Any] = {
-                "lead_score": lead["lead_score"],
-                "lead_temperature": lead["lead_temperature"],
-                "handoff_recommended": lead["handoff_recommended"],
-                "last_ai_summary": summary,
-                "ai_source": source,
-                "miwayki_bridge_build": BRIDGE_BUILD,
-            }
-            attr_report = await _chatwoot_merge_custom_attributes(
-                client,
-                account_id,
-                conversation_id,
-                updates,
-            )
+            try:
+                # Fallback heurístico si Dify no entrega campos estructurados
+                fallback = _heuristic_lead_signals(user_text, ai_source=source)
+                
+                dify_score = dify_result.get("lead_score")
+                dify_temp = dify_result.get("lead_temperature")
+                dify_handoff = dify_result.get("handoff_recommended")
+                dify_summary = dify_result.get("reasoning_summary")
+
+                final_score = dify_score if isinstance(dify_score, int) else fallback["lead_score"]
+                final_temp = dify_temp if isinstance(dify_temp, str) else fallback["lead_temperature"]
+                final_handoff = dify_handoff if isinstance(dify_handoff, bool) else fallback["handoff_recommended"]
+
+                if isinstance(dify_summary, str) and dify_summary.strip():
+                    summary = dify_summary.strip()
+                else:
+                    summary = reply_text.strip().replace("\n", " ")
+
+                if len(summary) > 280:
+                    summary = summary[:277] + "..."
+                
+                lead = {
+                    "lead_score": final_score,
+                    "lead_temperature": final_temp,
+                    "handoff_recommended": final_handoff,
+                }
+
+                updates: dict[str, Any] = {
+                    "lead_score": final_score,
+                    "lead_temperature": final_temp,
+                    "handoff_recommended": final_handoff,
+                    "last_ai_summary": summary,
+                    "ai_source": source,
+                    "miwayki_bridge_build": BRIDGE_BUILD,
+                }
+
+                # Consumir el feedback si fue inyectado en este turno
+                if consumed_feedback:
+                    updates["pending_seller_feedback"] = None
+
+                # 1. Persistencia de atributos de conversación
+                try:
+                    attr_report = await _chatwoot_merge_custom_attributes(
+                        client,
+                        account_id,
+                        conversation_id,
+                        updates,
+                        prev_conv=conv_data,
+                    )
+                except Exception as e:
+                    attr_report = {"ok": False, "error": f"Conv Attr Error: {e}"}
+
+                # 2. Sincronización de Contacto (Whitelist mapping - Isolada)
+                contact_report = {"status": "started"}
+                try:
+                    extracted = dify_result.get("extracted_fields")
+                    contact_id = _safe_get(conv_data, "meta", "sender", "id")
+
+                    if not contact_id:
+                        contact_report = {"status": "skipped", "reason": "no_contact_id_in_conv"}
+                    elif not isinstance(extracted, dict):
+                        contact_report = {"status": "skipped", "reason": "extracted_fields_not_dict"}
+                    else:
+                        c_update: dict[str, Any] = {}
+                        
+                        # Mapeo Whitelist Expandido (§33.1)
+                        # Name fallback
+                        val_name = extracted.get("name") or extracted.get("customer_name")
+                        if val_name: c_update["name"] = str(val_name).strip()
+                        
+                        # Email
+                        if extracted.get("email"): c_update["email"] = str(extracted["email"]).strip()
+                        
+                        # Phone: Validar E.164 (debe empezar con +) para evitar Error 422
+                        val_phone = str(extracted.get("phone", "")).strip()
+                        if val_phone.startswith("+") and len(val_phone) >= 8:
+                            c_update["phone_number"] = val_phone
+                        
+                        # Atributos personalizados (Whitelist §33.1)
+                        c_attrs: dict[str, Any] = {}
+                        if extracted.get("destination"): 
+                            c_attrs["travel_destination"] = str(extracted["destination"]).strip()
+                        
+                        # Travel dates fallback
+                        val_dates = extracted.get("travel_dates") or extracted.get("travel_date")
+                        if val_dates:
+                            c_attrs["travel_dates"] = str(val_dates).strip()
+                        
+                        if c_attrs:
+                            c_update["custom_attributes"] = c_attrs
+
+                        if c_update:
+                            contact_report = await _chatwoot_update_contact(client, account_id, contact_id, c_update)
+                        else:
+                            contact_report = {"status": "skipped", "reason": "no_whitelisted_data"}
+                except Exception as e:
+                    contact_report = {"ok": False, "error": f"Contact Sync Error: {e}"}
+
+                # 3. Sincronización de etiqueta "hot" (Isolada)
+                try:
+                    await _chatwoot_sync_labels(
+                        client,
+                        account_id,
+                        conversation_id,
+                        add_labels=["hot"] if final_score >= 70 else None,
+                        remove_labels=["hot"] if final_score < 70 else None,
+                        prev_conv=conv_data,
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                # Fallo catastrófico en la preparación de datos de sync
+                if attr_report is None:
+                    attr_report = {"ok": False, "error": str(e)}
 
     out: dict[str, Any] = {
         "ok": True,
@@ -375,4 +571,6 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
         out["lead"] = lead
     if attr_report is not None:
         out["chatwoot_custom_attributes"] = attr_report
+    if contact_report is not None:
+        out["chatwoot_contact_sync"] = contact_report
     return out

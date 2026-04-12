@@ -786,3 +786,342 @@ python3 -m http.server 8080 --directory chatwoot_fake_site
 
 ### Pendiente (usuario)
 - Crear repo vacío en GitHub y: `git remote add origin …`, `git push -u origin main`.
+
+
+## 2026-04-09 - Entrada #32 (cierre de sesión: puente validado y continuidad mañana)
+
+### Estado al cierre
+- Flujo mínimo validado: widget/sitio fake -> Chatwoot -> webhook -> bridge -> Dify -> respuesta en el hilo.
+- Bridge reconstruido en Lima y verificado con `bridge_build` actual en `/health` y conectividad Dify en `/health/dify`.
+- Prueba de `POST /chat-messages` desde el contenedor bridge con respuesta HTTP 200.
+
+### Decisiones vigentes
+- Mantener enfoque minimalista: primero puente estable; atributos/scoring avanzados quedan para la siguiente fase.
+- `BRIDGE_SYNC_CHATWOOT_ATTRIBUTES` permanece desactivado por defecto para no agregar complejidad temprana.
+- Operación del stack: cambios del bridge siempre con rebuild en VM Lima (daemon real del proyecto).
+
+### Próximo paso (mañana)
+- Continuar con contrato de salida estructurada en Dify y consumo en bridge; después activar atributos de Chatwoot de forma incremental.
+
+## 2026-04-11 - Entrada #33 (Gemini CLI integrado + Contrato JSON Dify validado)
+
+### Objetivo de la sesión
+- Integrar **Gemini CLI** como agente de arquitectura (`miwayki-architect`) para gestionar el ciclo de vida del proyecto.
+- Implementar el contrato estructurado **JSON** entre el Bridge y Dify según el Master Spec.
+- Estabilizar el stack local y validar el flujo comercial de MiWayki.
+
+### Cambios realizados
+- **Configuración de agente**:
+  - Se creó `GEMINI.md`.
+  - Se configuró el agente local `miwayki-architect` con el contexto maestro del proyecto.
+- **Actualización del Bridge**:
+  - `bridge/app/main.py` actualizado a la versión `0.5-dify-json`.
+  - Se implementó parseo JSON en `_dify_blocking_reply`.
+  - Se añadió fallback robusto: si Dify responde texto plano, el Bridge lo encapsula automáticamente como `reply_text`.
+  - Se adaptó `chatwoot_webhook` para consumir resultado estructurado y mantener fallback heurístico para `lead_score`, `lead_temperature` y `handoff_recommended`.
+- **Infraestructura y stack**:
+  - Rebuild exitoso del contenedor `bridge` en la VM Lima.
+  - Se detectó inestabilidad en `miwayki-chatwoot` (restart loop con `exit=1`); se recreó el contenedor y quedó operativo.
+  - `chatwoot_fake_site` servido localmente con `python3 -m http.server 8080`.
+
+### Resultados técnicos y validación
+- **Healthcheck del Bridge**:
+  - `GET /health` -> `bridge_build: "0.5-dify-json"`.
+  - `GET /health/dify` -> `reachable: true`.
+- **Confirmación de app activa en Dify**:
+  - El Bridge estaba llamando a la app `Prueba Gemini` mediante `DIFY_API_KEY`.
+- **Cambio de comportamiento en Dify**:
+  - Se actualizó el **System Prompt** del nodo LLM en `Prueba Gemini`, pasando de asistente genérico a **asistente comercial de MiWayki**.
+  - La app fue publicada desde la UI de Dify.
+- **Prueba E2E**:
+  - Se validó el flujo completo desde el widget servido en `127.0.0.1:8080`.
+  - El bot respondió con estilo comercial de MiWayki ante la consulta:
+    - “Hola, quiero información de Lunahuaná para 2 personas este sábado”
+  - Respuesta observada en widget:
+    - “¡Hola! Qué buena elección para este sábado. Para preparar tu cotización para 2 personas, ¿buscan un tour que incluya transporte desde Lima o prefieren solo las actividades de aventura allá?”
+
+### Estado actual
+- El Bridge ya puede procesar tanto texto plano como JSON estructurado desde Dify.
+- El stack local quedó operativo: Postgres, Redis, Chatwoot, Bridge y Dify.
+- La integración técnica **Chatwoot -> Bridge -> Dify -> Chatwoot** quedó validada.
+- Próximo paso recomendado:
+  - Configurar salida JSON estructurada en Dify.
+  - Activar `BRIDGE_SYNC_CHATWOOT_ATTRIBUTES=1`.
+  - Validar scoring y atributos en Chatwoot.
+
+
+## 2026-04-11 - Entrada #34 (Depuración de persistencia en Chatwoot + Diagnóstico de Webhooks)
+
+### Objetivo de la sesión
+- Instrumentar el Bridge con logs detallados para trazar el flujo de sincronización de atributos.
+- Validar el contrato estructurado JSON devuelto por Dify en condiciones reales.
+- Identificar la causa raíz de la falta de persistencia de `custom_attributes` en Chatwoot.
+
+### Cambios realizados
+- **Configuración del Entorno**:
+  - Setup del proyecto Gemini CLI completado.
+  - Creación de `GEMINI.md` y carga del agente local `miwayki-architect`.
+- **Actualización del Bridge**:
+  - `bridge/app/main.py` actualizado para soportar el parseo de JSON de Dify con fallback seguro a texto plano.
+  - Se añadió log temporal prefijado con `[ATTR_SYNC]` para el seguimiento detallado de la sincronización de atributos.
+  - Se implementó `flush=True` en los `print` para visibilidad inmediata en logs de Docker.
+- **Infraestructura**:
+  - Rebuild exitoso del Bridge en la VM Lima.
+  - Estabilización de `miwayki-chatwoot`: contenedor recreado tras detectar inestabilidad.
+  - `chatwoot_fake_site` servido localmente en `127.0.0.1:8080`.
+
+### Resultados técnicos y validación
+- **Healthcheck**:
+  - `GET /health` confirmó `bridge_build: "0.5-dify-json-debug"`.
+  - `GET /health/dify` confirmó conectividad con el contenedor `api` de Dify.
+- **Validación E2E del Widget**:
+  - Prueba exitosa con respuesta comercial estilo MiWayki.
+  - Los logs del Bridge confirmaron la recepción de la salida estructurada de Dify: `reply_text`, `lead_score`, `lead_temperature`, `handoff_recommended`, `reasoning_summary`, `extracted_fields`, `next_best_action`.
+- **Diagnóstico de Persistencia (Hallazgo Crítico)**:
+  - Se verificó que el flujo de sincronización en el Bridge se ejecuta y envía los atributos mezclados.
+  - **Prueba Manual A**: `PATCH` a `/conversations/3` devuelve HTTP 200 pero **no persiste** los atributos (Strong Params en Chatwoot los filtra).
+  - **Prueba Manual B**: `POST` a `/conversations/3/custom_attributes` **sí persiste** los atributos correctamente.
+  - **Confirmación**: Un `GET` posterior a la conversación devolvió los valores persistidos bajo `custom_attributes`.
+  - **Conclusión**: El problema de persistencia reside en el endpoint de escritura seleccionado en Chatwoot, no en Dify ni en la lógica de mezcla del Bridge.
+
+### Estado actual
+- Se validó manualmente que el endpoint correcto para atributos de conversación es el dedicado (`POST .../custom_attributes`).
+- El Bridge ya procesa la salida estructurada de Dify correctamente.
+- **Próximo paso**: Actualizar la llamada de escritura en el Bridge (`_chatwoot_merge_custom_attributes`) para usar el endpoint validado y revalidar la persistencia E2E.
+
+## 2026-04-11 - Entrada #35 (Persistencia en Chatwoot validada E2E + Fix de Endpoint)
+
+### Objetivo de la sesión
+- Corregir el fallo de persistencia de `custom_attributes` en Chatwoot mediante el uso del endpoint dedicado.
+- Validar el flujo completo: Widget -> Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot Persistence.
+
+### Cambios realizados
+- **Actualización del Bridge**:
+    - `bridge/app/main.py` actualizado a la versión `0.6-chatwoot-persistence-fix`.
+    - Se cambió el método de escritura de atributos de `PATCH` en el endpoint de conversación a `POST` en el endpoint específico: `/api/v1/accounts/{id}/conversations/{id}/custom_attributes`.
+    - Se mantuvo la lógica de "GET-then-merge" para preservar atributos previos no gestionados por el Bridge.
+    - Se mantuvieron los logs de depuración `[ATTR_SYNC]` con `flush=True`.
+- **Infraestructura**:
+    - Rebuild y despliegue exitoso del Bridge en la VM Lima.
+
+### Resultados técnicos y validación
+- **Healthcheck**: 
+    - `GET /health` confirmó `bridge_build: "0.6-chatwoot-persistence-fix"`.
+- **Prueba E2E (Widget)**:
+    - Se envió un mensaje inicial: "Hola".
+    - Respuesta de la IA: "¡Hola! Bienvenido a MiWayki. Estoy aquí para ayudarte a planear tu próximo viaje. ¿Qué destino tienes en mente para tu aventura?".
+- **Logs del Bridge (`[ATTR_SYNC]`)**:
+    - `BRIDGE_SYNC_CHATWOOT_ATTRIBUTES=True` detectado.
+    - `GET conversation result: True`.
+    - `exact POST URL: http://chatwoot:3000/api/v1/accounts/1/conversations/3/custom_attributes`.
+    - `POST HTTP status code: 200`.
+    - El cuerpo de la respuesta confirmó la persistencia de los campos enviados.
+- **Validación de Persistencia (GET)**:
+    - Un `GET` a la conversación confirmó que los atributos ahora residen en la base de datos de Chatwoot:
+        - `ai_source: "dify"`
+        - `debug_attr: "final_fix_verification"` (persistido de prueba previa)
+        - `lead_score: 10`
+        - `lead_temperature: "cold"`
+        - `handoff_recommended: false`
+        - `last_ai_summary: "El usuario inició la conversación con un saludo, no hay datos aún."`
+        - `miwayki_bridge_build: "0.6-chatwoot-persistence-fix"`
+
+### Estado actual
+- **Fix validado E2E**: El Bridge ahora persiste correctamente los `custom_attributes` de la conversación en Chatwoot.
+- El flujo **Dify (Salida estructurada) -> Bridge (Parsing) -> Chatwoot (Persistencia)** está totalmente validado en el entorno local.
+- El sistema es resiliente a respuestas de texto plano y gestiona correctamente la memoria de la conversación en Dify.
+- Próximo paso: Limpieza de logs de depuración, actualización de documentación y continuación con los ítems restantes de la fase básica local.
+
+## 2026-04-11 - Entrada #36 (Flujo local validado E2E sin logs temporales)
+
+### Objetivo de la sesión
+- Revalidar el flujo local después de la limpieza de logs temporales del Bridge.
+- Confirmar que la persistencia de `custom_attributes` en Chatwoot sigue intacta tras el cleanup.
+- Verificar que el stack local continúa operativo sin instrumentación de depuración `[ATTR_SYNC]`.
+
+### Cambios realizados
+- **Limpieza del Bridge**:
+    - `bridge/app/main.py` fue depurado para eliminar los `print` temporales prefijados con `[ATTR_SYNC]`.
+    - Se retiraron las salidas de depuración sin alterar la lógica de negocio validada previamente.
+    - Se conservó la lógica de parseo JSON de Dify con fallback seguro a texto plano.
+    - Se conservó la escritura por `POST` al endpoint correcto de Chatwoot:
+      `/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes`.
+    - Se conservó la lógica `GET-then-merge` para no sobrescribir atributos ya existentes en la conversación.
+- **Infraestructura**:
+    - Rebuild exitoso del contenedor `bridge` en la VM Lima.
+
+### Resultados técnicos y validación
+- **Healthcheck**:
+    - `GET /health` confirmó `bridge_build: "0.6-chatwoot-persistence-fix"`.
+- **Validación de autenticación Chatwoot API**:
+    - Se verificó correctamente el `CHATWOOT_API_TOKEN` real mediante `GET /api/v1/profile`.
+- **Prueba E2E (Widget)**:
+    - Se validó respuesta comercial del asistente para el mensaje:
+      `"Necesito cotizar un viaje a Cusco para mayo"`.
+- **Validación de Persistencia (GET)**:
+    - `GET /api/v1/accounts/1/conversations/3` confirmó persistencia de `custom_attributes` en la conversación.
+    - El estado observado incluyó:
+        - `ai_source: "dify"`
+        - `debug_attr: "final_fix_verification"`
+        - `lead_score: 45`
+        - `lead_temperature: "warm"`
+        - `handoff_recommended: false`
+        - `last_ai_summary: "El usuario indicó el destino (Cusco) y el mes (mayo), pero faltan la cantidad de personas y las fechas exactas."`
+        - `miwayki_bridge_build: "0.6-chatwoot-persistence-fix"`
+- **Validación post-cleanup**:
+    - Se verificó que ya no aparecen logs `[ATTR_SYNC]` en `docker logs miwayki-bridge`.
+- **Observación operativa**:
+    - El error `OSError: [Errno 48] Address already in use` al intentar levantar `python3 -m http.server 8080` no correspondió a caída del sitio, sino a que el puerto `8080` ya estaba ocupado por una instancia activa del servidor local.
+
+### Estado actual
+- El flujo local **Widget -> Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot** está validado E2E.
+- La persistencia de `custom_attributes` en Chatwoot sigue funcionando correctamente después del cleanup.
+- El Bridge quedó en estado limpio, sin logs temporales de depuración.
+- Próximo paso: actualizar documentación/runbooks del flujo validado y luego continuar con el siguiente ítem pendiente de la fase básica local.
+
+
+## 2026-04-11 - Entrada #36 (Auto-label "hot" validado E2E + verificación de fake site)
+
+### Objetivo de la sesión
+- Validar la asignación automática de etiqueta en Chatwoot para leads con `lead_score >= 70`.
+- Confirmar que el flujo local completo sigue operativo tras el cambio a `v0.7-auto-label-hot`.
+- Verificar el estado real de `chatwoot_fake_site` en `127.0.0.1:8080`.
+
+### Cambios realizados
+- **Actualización del Bridge**:
+  - `bridge/app/main.py` quedó corriendo con `bridge_build: "0.7-auto-label-hot"`.
+  - Se habilitó la asignación automática de la etiqueta `hot` cuando el `lead_score` final alcanza o supera 70.
+- **Validación del entorno local**:
+  - Rebuild exitoso del contenedor `bridge`.
+  - Healthcheck exitoso posterior al rebuild.
+  - `chatwoot_fake_site` levantado en `127.0.0.1:8080` con `python3 -m http.server`.
+
+### Resultados técnicos y validación
+- **Healthcheck**:
+  - `GET http://127.0.0.1:8000/health` devolvió:
+    - `bridge_build: "0.7-auto-label-hot"`
+- **Prueba E2E del Widget**:
+  - Mensaje enviado:
+    - `"Quiero reservar ahora, mi whatsapp es 999999999 y necesito precio para Cusco"`
+  - Respuesta del asistente:
+    - `"¡Excelente elección, Cusco es increíble! Para darte la mejor cotización y asegurar tu cupo, por favor confírmame: ¿para qué fecha planeas viajar y cuántas personas son? Con esto te contacto de inmediato."`
+- **Validación de persistencia en Chatwoot**:
+  - `GET /api/v1/accounts/1/conversations/3` devolvió:
+    - `custom_attributes.ai_source: "dify"`
+    - `custom_attributes.lead_score: 90`
+    - `custom_attributes.lead_temperature: "hot"`
+    - `custom_attributes.handoff_recommended: true`
+    - `custom_attributes.last_ai_summary: "El cliente tiene intención de compra inmediata y proporcionó su número de teléfono. Faltan la fecha de viaje y la cantidad de personas para proceder con la reserva."`
+    - `custom_attributes.miwayki_bridge_build: "0.7-auto-label-hot"`
+    - `labels: ["hot"]`
+- **Verificación de fake site**:
+  - `lsof -iTCP:8080 -sTCP:LISTEN` confirmó un proceso `python3` escuchando en el puerto `8080`.
+  - El error `OSError: [Errno 48] Address already in use` ocurrió al intentar iniciar un segundo servidor sobre el mismo puerto, no por caída del sitio ya activo.
+
+### Estado actual
+- El flujo local **Widget -> Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot** sigue operativo con la versión `0.7-auto-label-hot`.
+- La persistencia de `custom_attributes` continúa funcionando correctamente.
+- La asignación automática de la etiqueta `hot` quedó validada end-to-end.
+- `chatwoot_fake_site` sigue siendo dependiente de un servidor HTTP local separado del stack Docker y debe verificarse/levantarse manualmente después de reinicios del entorno.
+- Próximo paso: documentar el arranque seguro de `chatwoot_fake_site` y continuar con los siguientes ítems de lógica comercial/handoff de la fase básica local.
+
+## 2026-04-11 - Entrada #37 (Reconciliación de etiqueta "hot" validada E2E)
+
+### Objetivo de la sesión
+- Implementar y validar la reconciliación automática de la etiqueta "hot" en Chatwoot basada en el `lead_score`.
+- Asegurar que la etiqueta se elimine si el score baja de 70 y se añada si es mayor o igual a 70.
+- Mantener la integridad del flujo de sincronización de atributos y contactos.
+
+### Cambios realizados
+- **Actualización del Bridge**:
+  - `bridge/app/main.py` actualizado a la versión `0.9-hot-label-fix`.
+  - Se mejoró el helper `_chatwoot_sync_labels` para soportar `add_labels` y `remove_labels` de forma atómica.
+  - Se actualizó el webhook para aplicar la lógica de reconciliación de etiquetas en el Paso 3.
+- **Infraestructura**:
+  - Rebuild exitoso del contenedor `bridge` en la VM Lima.
+
+### Resultados técnicos y validación
+- **Healthcheck**:
+  - `GET http://127.0.0.1:8000/health` -> `bridge_build: "0.9-hot-label-fix"`.
+- **Prueba E2E (Widget)**:
+  - **Caso Frío**: Mensaje "Hola" resultó en score < 70 y la eliminación exitosa de la etiqueta "hot" (labels: `[]`).
+  - **Caso Caliente**: Mensaje con intención de compra y datos resultó en score >= 70 y la re-adición exitosa de la etiqueta "hot" (labels: `["hot"]`).
+- **Persistencia**:
+  - Los `custom_attributes` de la conversación se persistieron correctamente con la versión de build `0.9-hot-label-fix`.
+  - La sincronización de contacto (`contact_sync`) se validó como funcional y persistente.
+
+### Estado actual
+- El flujo local **Widget -> Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot (Attributes + Labels + Contact)** está validado end-to-end.
+- La lógica de etiquetas ahora es bidireccional y se reconcilia con el estado del lead.
+- Próximo paso: limpieza de logs de depuración y preparación para el siguiente bloque de lógica comercial.
+
+## 2026-04-11 - Entrada #38 (Captura de Notas Privadas como Contexto validada)
+
+### Objetivo de la sesión
+- Implementar la captura de Notas Privadas (Seller Feedback) para enriquecer el contexto de la IA.
+- Asegurar que el feedback del vendedor se inyecte en el siguiente mensaje del usuario y se consuma correctamente.
+- Mantener la integridad de los flujos previos (JSON, Atributos, Contactos, Etiquetas).
+
+### Cambios realizados
+- **Actualización del Bridge**:
+  - `bridge/app/main.py` actualizado a la versión `0.10-private-note-context`.
+  - Intercepción de notas privadas de agentes antes del filtro de mensajes de usuario.
+  - Almacenamiento del feedback en el atributo `pending_seller_feedback` de la conversación.
+  - Pre-fetch de la conversación en mensajes de usuario para inyectar el contexto: `[CONTEXTO VENDEDOR]: {feedback}`.
+  - Limpieza del atributo `pending_seller_feedback` tras la respuesta exitosa de la IA, solo si fue consumido en ese turno.
+- **Eficiencia**:
+  - Se eliminó la doble llamada GET a la conversación reutilizando los datos del pre-fetch en el bloque de sincronización.
+
+### Resultados técnicos y validación (Prevista)
+- **Healthcheck**: `bridge_build: "0.10-private-note-context"`.
+- **Flujo**:
+  1. Nota privada guardada en Chatwoot.
+  2. Mensaje de usuario recibe respuesta de Dify que considera la nota.
+  3. El atributo se limpia automáticamente en Chatwoot.
+
+### Estado actual
+- El Bridge ya soporta la colaboración híbrida humano-IA mediante notas privadas.
+- Fase básica local funcionalmente completa.
+
+## 2026-04-11 - Entrada #39 (Validación E2E de Contexto por Nota Privada)
+
+### Objetivo de la sesión
+- Validar end-to-end la inyección de contexto mediante Notas Privadas en el flujo conversacional.
+- Confirmar la persistencia y limpieza automática del atributo `pending_seller_feedback`.
+
+### Resultados de la validación
+- **Bridge Build**: `0.10-private-note-context` verificado mediante `/health`.
+- **Captura exitosa**: Se ingresó una nota privada con el texto: "El cliente busca Cusco para mayo, presupuesto 500 USD por persona". El atributo `pending_seller_feedback` se persistió correctamente en Chatwoot.
+- **Inyección y Respuesta**: Al enviar un mensaje de usuario ("Hola, ¿tienes disponibilidad?"), la IA reflejó explícitamente el contexto de la nota (destino Cusco, mes mayo y presupuesto de 500 USD) en su respuesta.
+- **Consumo y Limpieza**: Tras la respuesta de la IA, el atributo `pending_seller_feedback` fue eliminado automáticamente de la conversación en Chatwoot, confirmando el ciclo de vida del contexto.
+- **Estado final de la prueba**:
+  - `lead_score`: 60
+  - `lead_temperature`: "warm"
+  - `handoff_recommended`: false
+  - `labels`: `[]` (reconciliación de etiquetas funcionando correctamente)
+- **Integridad**: Se confirmó que la persistencia de atributos, la sincronización de contactos y las reglas de etiquetas "hot" se mantienen operativas sin regresiones.
+
+### Estado actual
+- La **fase básica local** está funcionalmente validada en su totalidad: flujo E2E, scoring, persistencia de atributos, sincronización de contactos, reconciliación de etiquetas y colaboración híbrida mediante notas privadas.
+- El siguiente paso es la revisión de cierre de los ítems de la fase básica local y la preparación de documentación final antes de la transición a infraestructura en la nube.
+
+## 2026-04-11 - Entrada #40 (CIERRE DE FASE BÁSICA LOCAL)
+
+### Objetivo
+- Formalizar el cierre de la fase básica local tras completar todas las validaciones funcionales.
+- Entregar la documentación operativa necesaria para reproducir el stack.
+
+### Resumen de hitos alcanzados
+- **Integración E2E**: El flujo completo entre Widget, Chatwoot, Bridge y Dify es estable y maneja tanto JSON como texto plano.
+- **Persistencia Avanzada**: Atributos de conversación, etiquetas dinámicas ("hot") y sincronización de contactos validados.
+- **Colaboración Humano-IA**: Implementada la captura de notas privadas como contexto enriquecido para la IA.
+- **Salud del Sistema**: Endpoints de monitoreo (`/health`, `/health/dify`) operativos.
+
+### Entregables de cierre
+- **Runbook**: Creado `docs/RUNBOOKS/local_operations.md` con los procedimientos de arranque, rebuild y validación.
+- **Actualización de Docs**: `compose/README.md` y `GEMINI.md` reflejan el estado final de la fase (`build 0.10`).
+
+### Estado actual
+- **FASE BÁSICA LOCAL: CERRADA Y VALIDADA.**
+- El stack local es reproducible y funcionalmente completo según el Master Spec.
+- Próxima etapa: Planificación de transición a la nube (AWS EC2) y revisión de portabilidad.

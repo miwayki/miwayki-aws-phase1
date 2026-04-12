@@ -141,6 +141,28 @@ Configura en `.env.bridge`:
 - `DIFY_API_BASE=http://api:5001/v1` (desde el bridge; **no** uses `http://127.0.0.1/v1` dentro del contenedor)
 - `DIFY_API_KEY=<secret de la app en Dify → API Access>` (formato `app-...`). Si `DIFY_API_KEY` está vacío, el bridge usa solo `BRIDGE_AUTO_REPLY`.
 
+### Flujo E2E, Persistencia y Contexto (Validado en v0.10)
+
+El flujo completo **Widget -> Chatwoot -> Bridge -> Dify -> Bridge -> Chatwoot** ha sido validado localmente en su totalidad con la versión `0.10-private-note-context`.
+
+**1. Operaciones validadas:**
+- **Contrato Dify:** Parseo JSON con fallback a texto plano.
+- **Atributos:** Persistencia real en Chatwoot (endpoint `POST .../custom_attributes`).
+- **Contactos:** Sincronización de nombre, email, teléfono (E.164) y atributos de viaje.
+- **Etiquetas:** Reconciliación automática de la etiqueta `hot` (score ≥ 70).
+- **Contexto Híbrido:** Captura de notas privadas (`pending_seller_feedback`) e inyección como contexto AI.
+
+**2. Procedimientos de verificación:**
+
+```bash
+# Rebuild y salud (v0.10)
+./miwayki-compose.sh up -d --build bridge
+curl -sS http://127.0.0.1:8000/health | jq .bridge_build
+```
+
+Para operaciones detalladas, ver `docs/RUNBOOKS/local_operations.md`.
+
+
 Levantar bridge junto al stack:
 
 ```bash
