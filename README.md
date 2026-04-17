@@ -1,7 +1,7 @@
 # Miwayki AWS Phase 1 Pilot
 
 End-to-end AWS pilot:
-fake site -> Chatwoot widget -> Chatwoot -> bridge -> Dify -> reply in widget.
+fake site -> Chatwoot widget -> Chatwoot -> bridge -> Langflow -> reply in widget.
 
 ## Public URLs
 - Fake site: http://34.207.15.203:8080
@@ -11,7 +11,7 @@ fake site -> Chatwoot widget -> Chatwoot -> bridge -> Dify -> reply in widget.
 - EC2 (Docker)
 - Chatwoot + Sidekiq
 - Bridge (FastAPI)
-- Dify
+- Langflow
 - Fake site (nginx)
 
 ## Quick smoke test

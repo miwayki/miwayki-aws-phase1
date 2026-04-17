@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  langflow:
+    image: langflowai/langflow:latest
+    container_name: miwayki-langflow
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7860:7860"
+    environment:
+      - LANGFLOW_HOST=0.0.0.0
+      - LANGFLOW_PORT=7860
+    networks:
+      - core_net
+
+networks:
+  core_net:
+    name: miwayki-core-net
+    external: true

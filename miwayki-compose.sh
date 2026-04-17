@@ -33,4 +33,7 @@ exec docker compose \
   -f docker-compose.yml \
   -f docker-compose.chatwoot.yml \
   -f docker-compose.bridge.yml \
+  -f docker-compose.nocodb.yml \
+  -f docker-compose.langflow.yml \
+  -f docker-compose.fakesite.yml \
   "$@"

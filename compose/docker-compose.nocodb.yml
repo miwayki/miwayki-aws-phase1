@@ -1,0 +1,45 @@
+# NocoDB — Catálogo comercial vivo para MiWayki.
+# Usa su propia instancia de PostgreSQL (nocodb-pg) para evitar conflictos de schema con Chatwoot.
+
+services:
+  nocodb:
+    image: nocodb/nocodb:latest
+    container_name: miwayki-nocodb
+    restart: unless-stopped
+    environment:
+      NC_DB: "pg://nocodb-pg:5432?u=nocodb&p=${NOCODB_PG_PASSWORD}&d=nocodb_data"
+      NC_AUTH_JWT_SECRET: "${NOCODB_JWT_SECRET}"
+      NC_DISABLE_TELE: "true"
+    ports:
+      - "127.0.0.1:${NOCODB_PORT:-8090}:8080"
+    depends_on:
+      nocodb-pg:
+        condition: service_healthy
+    networks:
+      - core_net
+
+  nocodb-pg:
+    image: postgres:16-alpine
+    container_name: miwayki-nocodb-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nocodb_data
+      POSTGRES_USER: nocodb
+      POSTGRES_PASSWORD: ${NOCODB_PG_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nocodb -d nocodb_data"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - nocodb_pg_data:/var/lib/postgresql/data
+    networks:
+      - core_net
+
+volumes:
+  nocodb_pg_data:
+
+networks:
+  core_net:
+    external: true
+    name: miwayki-core-net

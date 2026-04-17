@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  fake-site:
+    image: nginx:alpine
+    container_name: miwayki-fake-site
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ../chatwoot_fake_site:/usr/share/nginx/html:ro
+    networks:
+      - core_net
+
+networks:
+  core_net:
+    name: miwayki-core-net
+    external: true
