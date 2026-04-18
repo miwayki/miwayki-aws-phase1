@@ -123,6 +123,7 @@ async def chatwoot_webhook(request: Request) -> dict[str, Any]:
             langflow_result, new_langflow_cid = await blocking_reply(
                 user_text, cw_cid, langflow_conversation_id=prev_langflow_cid
             )
+            log.info(f"DEBUG LANGFLOW RAW RESULT: {langflow_result}")
             if new_langflow_cid:
                 try:
                     await session_repo.set_langflow_conversation_id(int(cw_cid), new_langflow_cid)

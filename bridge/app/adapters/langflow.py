@@ -36,12 +36,10 @@ async def blocking_reply(
 
     url = f"{LANGFLOW_API_BASE}/run/{LANGFLOW_FLOW_ID}"
     headers = {
-        "Authorization": f"Bearer {LANGFLOW_API_KEY}",
+        "x-api-key": LANGFLOW_API_KEY,
         "Content-Type": "application/json",
     }
-    
-    session_id = langflow_conversation_id or f"chatwoot-{chatwoot_conversation_id}"
-    
+    session_id = langflow_conversation_id or f"cw2-{chatwoot_conversation_id}"
     body: dict[str, Any] = {
         "input_value": query,
         "input_type": "chat",

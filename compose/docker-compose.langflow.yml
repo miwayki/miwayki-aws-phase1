@@ -10,8 +10,14 @@ services:
     environment:
       - LANGFLOW_HOST=0.0.0.0
       - LANGFLOW_PORT=7860
+      - LANGFLOW_DATABASE_URL=sqlite:////app/data/langflow/langflow.db
+    volumes:
+      - langflow_data:/app/data/langflow
     networks:
       - core_net
+
+volumes:
+  langflow_data:
 
 networks:
   core_net:

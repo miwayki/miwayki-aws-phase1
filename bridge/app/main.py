@@ -38,7 +38,18 @@ async def lifespan(application: FastAPI) -> AsyncGenerator:
         pass
 
 
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
 app = FastAPI(title="Miwayki Bridge", version="2.0.0", lifespan=lifespan)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    log.error(f"422 Validation Error on {request.url.path}: {exc.errors()} body={exc.body}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": exc.body},
+    )
 
 log.info("bridge_starting build=%s", BRIDGE_BUILD)
 

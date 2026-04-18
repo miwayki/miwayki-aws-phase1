@@ -34,16 +34,17 @@ async def upsert_lead(req: LeadUpsertRequest) -> Any:
             update_fields[field_name] = val
             fields_updated.append(field_name)
 
-    result = await lead_repo.upsert_lead(req.conversation_id, **update_fields)
+    c_id = req.conversation_id if req.conversation_id is not None else 1
+    result = await lead_repo.upsert_lead(c_id, **update_fields)
 
     log.info(
         "lead_upserted: conversation=%d lead=%d is_new=%s fields=%s",
-        req.conversation_id, result["lead_id"], result["is_new"], fields_updated,
+        c_id, result["lead_id"], result["is_new"], fields_updated,
     )
 
     return LeadResponse(
         lead_id=result["lead_id"],
-        conversation_id=req.conversation_id,
+        conversation_id=c_id,
         commercial_state=result["commercial_state"],
         is_new=result["is_new"],
         fields_updated=fields_updated,

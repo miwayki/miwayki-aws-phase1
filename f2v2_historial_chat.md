@@ -205,24 +205,12 @@ inputs = [
         value="http://miwayki-bridge:8000",
         info="URL interna del bridge dentro de Docker/Compose."
     ),
-    StrInput(
-        name="session_id",
-        display_name="Session ID",
-        value="",
-        info="ID de conversación inyectado desde Chat Input o desde otra parte del flujo."
-    ),
     DropdownInput(
         name="action",
-        display_name="Action",
-        options=[
-            "register_lead",
-            "list_tours",
-            "calculate_quote",
-            "payment_instructions",
-            "register_voucher",
-        ],
-        value="list_tours",
-        info="Acción que ejecutará el bridge.",
+        display_name="Accion a realizar",
+        options=["list_tours", "calculate_quote", "register_lead", "payment_instructions", "register_voucher"],
+        value="calculate_quote",
+        info="ACCIÓN obligatoria. Para cotizar usa calculate_quote.",
         tool_mode=True
     ),
     MultilineInput(
@@ -402,3 +390,93 @@ curl --request POST \
        "session_id": "YOUR_SESSION_ID_HERE"
      }'
 ```
+
+***
+
+## 6. Correcciones y Estabilización Posterior (Sesión de Mantenimiento)
+
+Durante una sesión de pruebas posterior, se identificó que el sistema había sufrido una pérdida masiva de datos (Langflow vacío, NocoDB sin datos, Chatwoot sin widgets). La causa raíz fue **la pérdida de los volúmenes persistentes de Docker** (probablemente por usar `docker-compose down -v` o por recrear la máquina virtual Lima).
+
+Ante este escenario de "arranque en frío", se ejecutaron y documentaron las siguientes correcciones:
+
+### 6.1. Reparación del Widget de Fake Site
+- **Problema:** Al reiniciar la base de datos de Chatwoot (`miwayki-postgres`), el Inbox anterior y su `websiteToken` desaparecieron. La página de pruebas (`localhost:8080`) intentaba usar el token antiguo y no renderizaba el widget.
+- **Solución:** Se extrajo el nuevo token generado desde la base de datos de Chatwoot (`SELECT website_token FROM channel_web_widgets;`). Se actualizó el archivo `chatwoot_fake_site/index.html` insertando el token correcto (`ELsmms2CKZGLGCAuSNNZvLaV`).
+
+### 6.2. Verificación de Webhook hacia el Bridge (Chatwoot)
+- **Estado:** Pese al reinicio, el Webhook interno de Chatwoot hacia el Bridge apunta correctamente al alias Docker `http://bridge.local:8000/webhooks/chatwoot`. Adicionalmente, el endpoint del Bridge (`http://127.0.0.1:8000/health`) responde `{"status": "ok"}` satisfactoriamente sin errores.
+
+### 6.3. Solución real a Flujos de Langflow Efímeros
+- **Diagnóstico Profundo:** Añadir un volumen a `~/.local/share` fue insuficiente porque las imágenes nuevas de Langflow alojan el archivo por defecto dentro del entorno virtual (`/app/.venv/lib/python3.12/site-packages/langflow/langflow.db`).
+- **Solución Final:**
+  1. Se copió y resguardó la base de datos efímera en `/tmp/langflow.db`.
+  2. Se parcheó `compose/docker-compose.langflow.yml` para forzar la externalización del archivo:
+     ```yaml
+     environment:
+       - LANGFLOW_DATABASE_URL=sqlite:////app/data/langflow/langflow.db
+     volumes:
+       - langflow_data:/app/data/langflow
+     ```
+  3. Se aseguraron los permisos internos del contenedor (`chown -R user:1000 /app/data`).
+
+### 6.4. NocoDB (Vaciado por pérdida de volúmen y correcciones)
+- **Diagnóstico:** El contenedor `nocodb-pg` sufrió el impacto de la pérdida de volúmenes, lo que implicó que su disco `nocodb_pg_data` arrancara vacío.
+- **Acción Inicial (y error):** Intentar subir los datos a `nocodb_data` fue una mala decisión, ya que NocoDB usa esta base puramente para métricas y bloquea schemas customizados (`catalog`).
+- **Acción Correctiva:** Se migraron en bloque todas las 7 tablas comerciales puras usando sentencias SQL directo a la base de datos principal de negocio `miwayki-postgres` (db `miwayki`). Finalmente, para asegurar que NocoDB las viera y las tratase como Headless CMS editable, las tablas se asignaron al esquema `public`.
+
+### 6.5. Nota Técnica sobre NocoDB + Postgres Externo
+Para futuras iteraciones, no asumir automáticamente que "conectar Postgres" implica que NocoDB va a descubrir, indexar y exponer cualquier tabla o schema como lo haría pgAdmin. Según la documentación y discusiones oficiales actuales, NocoDB no descubre todos los schemas por defecto y trata cada conexión externa de forma bastante específica por schema/base.
+
+**Hallazgos ya confirmados en este caso:**
+1. Conectar la base primaria de NocoDB (`NC_DB`) como si fuera data source externo fue una mala arquitectura, porque terminó exponiendo tablas internas `nc_*` y metadata, no el catálogo comercial.
+2. El error *"Forbidden host name or IP address"* no era un bug funcional del formulario, sino la protección SSRF/self-host que obliga a habilitar explícitamente conexiones a hosts locales/internos agregando `NC_ALLOW_LOCAL_EXTERNAL_DBS=true` en el docker-compose de NocoDB.
+3. El flujo real de NocoDB para fuentes externas es: Connect External Data -> seleccionar/crear conexión -> configurar database/schema -> Test Database Connection -> Add Source.
+4. Que la conexión pase “Test connection” NO garantiza que NocoDB vaya a mostrar las tablas, si estas están ocultas en un Schema no privilegiado, para solucionarlo es sumamente útil mapear las tablas directamente en el esquema `public`.
+
+***
+
+## 7. Estabilización Avanzada del Cerebro Comercial Langflow v1.0 (Edge Cases)
+
+Durante la validación *End-to-End* de la integración `Chatwoot -> Langflow -> Bridge -> NocoDB`, surgieron múltiples comportamientos indeseados originados en la forma restrictiva en que Langflow compila los "Tool Schemas" para Langchain y en la pedantería de los modelos LLM (Gemini). A continuación se documentan todos los "gotchas" y soluciones arquitectónicas implementadas para lograr un sistema robusto:
+
+### 7.1 Envenenamiento de Memoria del Agente (Session Cache)
+- **Problema:** Chatwoot envía un ID de sesión constante (ej: `chatwoot-1`). Tras los primeros errores (debido a schemas incompletos o errores de red documentados anteriormente), el Agente de Langflow almacenaba permanentemente en su base de datos `langflow.db` (tabla `message`) el "recuerdo" de que la herramienta fallaba. Incluso después de arreglar la herramienta, el Agente rechazaba utilizarla, alegando fallos pasados.
+- **Solución Dinámica:** Se modificó `bridge/app/adapters/langflow.py` para inyectar a Langflow un ID con prefijo nuevo (e.g. `swapped cw2-{id}` en vez de `chatwoot-{id}`). Esto engañó a Langflow para instanciar un Agente amnésico que compilara exitosamente el último grafo. En consecuencia, se ajustó la validación Pydantic en los schemas (`schemas/lead.py` y `schemas/quote.py`) para poder quitar el prefijo `cw2-` antes de enviar el ID numérico interno hacia Postgres, evitando excepciones 422 HTTP.
+
+### 7.2 Campos Inertes o Invisibles al LLM (`tool_mode=True`)
+- **Problema:** Al dotar al Custom Component "Cerebro Comercial MiWayki" con múltiples campos para la extracción de variables (`tour_code`, `travel_date`, `party_size` declarados mediante `StrInput`), el Agente se negaba rotundamente a pedirlos indicando *"La herramienta actual no me permite ingresar el nombre ni la fecha"*.
+- **Causa Raíz en Langflow:** Langflow filtra implícitamente el Schema de herramientas enviado vía LangChain. Sólo se comunican a la IA aquellos `Input` que contengan el parámetro explícito `, tool_mode=True`. 
+- **Solución:** Se añadió este sufijo booleano a la definición de todas y cada una de las 7 props expuestas (`action` incluida).
+
+### 7.3 Crash Silencioso por Indentación Python en Custom Components
+- **Problema:** Al pegar código iterativo, si se dejan espacios residuales en el cuerpo de una Clase (`IndentationError: unexpected indent` en Python), Langflow **no bloquea visualmente** el lienzo ni detiene el flujo al iniciar, sino que **apaga silenciosamente el Custom Component defectuoso** durante la compilación del binario.
+- **Impacto y Síntomas:** En trazas visuales de Langflow Explorer, el array `available_tool_names` del Agente llegó a valer puramente `["get_current_date"]`, desapareciendo las acciones core de ventas. El LLM empezaba a alucinar llamadas a funciones ("Executed invalid_tool: calculate_quote").
+- **Solución Operativa:** Re-pegar con estricta limpieza (`Ctrl+A`, Delete) bloques completos desde el inicio del `class CerebroComercial` y siempre hacer click en Play (`▷`) en la interfaz web de "Chat Output" posterior a guardar código para forzar la vinculación de puertos dinámicos.
+
+### 7.4 "Semantic Pedantry" y el mapeo literal de LLMs (Gemini Flash)
+- **Problema:** El usuario solicitó textualmente en el chat: *"cotízame Machu Picchu Full Day"*. El componente comercial definía la cajita del nombre o slug como: `name="tour_code", display_name="Tour Code", info="Código del tour"`. El modelo LLM (Gemini) se resistió indicando que *"no poseía el código del tour pedido, ni contaba con herramientas que aceptaran nombres"*.
+- **Solución (Prompt Engineering Activo):** Se refactorizaron drásticamente los label internos para psicología de LLMs. Se asignó `display_name="Nombre del Tour"` con directiva `info="Acepta nombres completos..."`, eliminando el bloqueo semántico del modelo al forzar encuadres literales.
+
+### 7.5 Estrictez Pydantic via Bridge (Error HTTP 422 ISO Date)
+- **Problema:** Una vez superado el bloqueo de herramientas, la IA completó el campo fecha ingresando la frase humana *"15 de julio de 2026"* dentro del payload. El orquestador Bridge arrojó error fatal estricto: `status 422: Input should be a valid date or datetime`. Pydantic no procesa strings espaciales libres para el tipo nativo `datetime.date`.
+- **Solución:** Se corrigió en la clase del Componente de Langflow, asignando al prop date el `info` de: `"FORMATO OBLIGATORIO: YYYY-MM-DD. Transforma el texto de fecha al formato estricto ISO antes de mapear."` 
+
+### 7.7 Cierre de Brechas en Pydantic y Completitud del Schema Comercial
+- **Problema Descubierto:** Durante las pruebas finales de reservas (`payment_instructions` y `register_voucher`), la IA indicó *"no tengo dónde ingresar el identificador de cotización ni el registro del voucher"*. El LLM fue lógicamente honesto: el Custom Component carecía de inputs de texto que expusieran las variables Pydantic necesarias que el Backend exige para completar operaciones financieras.
+- **Resolución Estructural:**
+  1. Se implementaron dos campos `StrInput` adicionales explícitos: `quote_id` y `voucher_reference` asociados a sus props `tool_mode=True`.
+  2. Se añadió a todos los métodos una regex protectora (`clean_session = re.sub(r'^(chatwoot\-|cw2\-)', '', session_id)`) para extirpar cualquier prefijo *Dummy* nativo del frontend y transformar el hash limpio en un ID tipo `Integer`. Esta barrera impidió permanentemente excepciones tipo `422 Unprocessable Entity` en Pydantic para APIs estandarizadas del Bridge.
+  3. Resultado: **Integración exitosa End-to-End validada**.
+
+***
+
+## 8. Siguientes Pasos (Próxima Sesión y Migración AWS)
+
+Con la arquitectura validada en tu totalidad, el sistema está robusto y a salvo de bloqueos técnicos. Sin embargo, para producción se identificó una última vertiente funcional de Inteligencia Artificial que se abordará en la siguiente iteración:
+
+1. **Refinamiento de "Persona" y Prompt Engineering**
+   - **Diagnóstico:** Se observó que la IA puede mostrar un rasgo autómata o "Robotizado" (pidiendo validaciones obvias, o ignorando historia conversacional de una cotización) si su Prompt principal y sus instrucciones de herramienta son excesivamente imperativas y aisladas. 
+   - **Acción a tomar (Mañana):** Reemplazar el `System Prompt` del Agente Langflow. La directiva pasará a: *"OBLIGATORIO: Usa tu memoria. No le pidas al usuario que repita datos que ya te dio en la conversación de este Tour. Usa la herramienta de forma asertiva."* Esto consolidará una personalidad extremadamente amena, cálida y eficiente, aprovechando la persistencia y la memoria natural de LangChain.
+
+2. **Replicación Final en Arquitectura AWS**
+   - Habiendo catalogado todos los bugs de memoria y de compilación, el siguiente paso será migrar los contenedores y volúmenes estabilizados (Fase 2 v2) a la respectiva instancia EC2 en Amazon Web Services, previendo e inyectando las mitigaciones documentadas en esta bitácora para pre-evitar cualquier regresión.

@@ -84,7 +84,7 @@ async def _fetch_records(table_id: str, *, where: str | None = None) -> list[dic
     if cached is not None:
         return cached
 
-    url = f"{NOCODB_BASE_URL}/api/v2/meta/tables/{table_id}/records"
+    url = f"{NOCODB_BASE_URL}/api/v2/tables/{table_id}/records"
     params: dict[str, Any] = {"limit": 200}
     if where:
         params["where"] = where

@@ -76,9 +76,10 @@ async def calculate_quote(req: QuoteRequest) -> Any:
         exceptions=exceptions,
     )
 
+    c_id = req.conversation_id if req.conversation_id is not None else 1
     # Persist: upsert lead + crear quote
     lead = await lead_repo.upsert_lead(
-        req.conversation_id,
+        c_id,
         destination=req.tour_code,
         party_size=req.party_size,
         group_type=req.group_type.value,
@@ -103,7 +104,7 @@ async def calculate_quote(req: QuoteRequest) -> Any:
 
     log.info(
         "quote_calculated: conversation=%d quote=%d total=%.2f handoff=%s",
-        req.conversation_id, quote_id, float(breakdown.total_price_pen), handoff.required,
+        c_id, quote_id, float(breakdown.total_price_pen), handoff.required,
     )
 
     return QuoteResponse(

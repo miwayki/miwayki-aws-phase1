@@ -10,6 +10,7 @@ services:
       NC_DB: "pg://nocodb-pg:5432?u=nocodb&p=${NOCODB_PG_PASSWORD}&d=nocodb_data"
       NC_AUTH_JWT_SECRET: "${NOCODB_JWT_SECRET}"
       NC_DISABLE_TELE: "true"
+      NC_ALLOW_LOCAL_EXTERNAL_DBS: "true"
     ports:
       - "127.0.0.1:${NOCODB_PORT:-8090}:8080"
     depends_on:

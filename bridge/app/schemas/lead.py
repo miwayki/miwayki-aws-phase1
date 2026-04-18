@@ -2,13 +2,27 @@ from __future__ import annotations
 
 """Schemas para leads."""
 
-from typing import List, Optional
+from typing import List, Optional, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LeadUpsertRequest(BaseModel):
-    conversation_id: int = Field(..., gt=0)
+    conversation_id: Optional[int] = Field(1, description="ID de conversacion de Chatwoot. Default: 1.")
+    
+    @field_validator('conversation_id', mode='before')
+    @classmethod
+    def parse_conv_id(cls, v: Any) -> int:
+        if isinstance(v, str):
+            if v.startswith("chatwoot-") or v.startswith("cw2-"):
+                v = v.replace("chatwoot-", "").replace("cw2-", "")
+            try:
+                return int(v)
+            except ValueError:
+                return 1
+        if v is None:
+            return 1
+        return int(v)
     customer_name: Optional[str] = None
     customer_email: Optional[str] = None
     customer_phone: Optional[str] = None
